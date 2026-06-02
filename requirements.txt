@@ -1,0 +1,24 @@
+# DevCLI dependencies
+# TUI
+rich>=13.0.0
+textual>=0.52.0
+
+# Async SQLite
+aiosqlite>=0.19.0
+
+# HTTP / OpenAI client
+httpx>=0.27.0
+
+# File watching
+watchfiles>=0.21.0
+
+# Code parsing
+tree-sitter>=0.20.0
+tree-sitter-python>=0.20.0
+tree-sitter-typescript>=0.20.0
+
+# Encryption for API keys
+cryptography>=42.0.0
+
+# Environment
+python-dotenv>=1.0.0
