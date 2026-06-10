@@ -1,10 +1,9 @@
 """DevCLI Textual TUI application."""
-import asyncio
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
+from textual.widgets import Button, Header, Input, RichLog, Static
 
 from devcli.core.command_parser import CommandParser, CommandType
 from devcli.core.lifecycle import LifecycleStateMachine
@@ -12,8 +11,6 @@ from devcli.core.model_gateway import ModelGateway
 from devcli.core.session_manager import SessionManager
 from devcli.db import database as db
 from devcli.db.models import Stage
-from devcli.tools.git import GitTool
-from devcli.tools.base import ToolContext
 
 
 class DevCLIApp(App):
@@ -24,19 +21,15 @@ class DevCLIApp(App):
         layout: horizontal;
         height: 1fr;
     }
-    #sidebar {
-        width: 22%;
-        border: solid green;
-        padding: 1;
-    }
     #content {
-        width: 56%;
+        width: 100%;
         border: solid blue;
     }
-    #nav {
-        width: 22%;
+    #stage-display {
+        width: 20;
         border: solid yellow;
-        padding: 1;
+        padding: 0 1;
+        content-align: center middle;
     }
     #status-bar {
         height: 3;
@@ -56,22 +49,6 @@ class DevCLIApp(App):
     .stage-active {
         color: green;
         text-style: bold;
-    }
-    .stage-completed {
-        color: blue;
-        text-style: dim;
-    }
-    .stage-pending {
-        color: white;
-        text-style: dim;
-    }
-    #file-tree-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    #stage-title {
-        text-style: bold;
-        margin-bottom: 1;
     }
     #markdown-view {
         overflow-y: auto;
@@ -94,8 +71,7 @@ class DevCLIApp(App):
         self.model_gateway = ModelGateway()
         self.command_parser = CommandParser()
         self.state_machine: LifecycleStateMachine | None = None
-        self._current_stage_index = 0
-        self._git_tool = GitTool()
+        self._current_stage = None
 
     async def on_mount(self) -> None:
         await db.init_db()
@@ -108,26 +84,19 @@ class DevCLIApp(App):
         self.state_machine = LifecycleStateMachine(
             self.session_id, self.session_manager, self.model_gateway
         )
-        self.set_timer(0.5, self._refresh_file_tree)
-        self.set_timer(1.0, self._update_stage_labels)
+        self.set_timer(1.0, self._update_stage_display)
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main-layout"):
-            with Vertical(id="sidebar"):
-                yield Label("Project Files", id="file-tree-title")
-                yield Tree("Files", id="file-tree")
             with Vertical(id="content"):
                 yield RichLog(id="main-log", markup=True, highlight=True, auto_scroll=True)
-            with Vertical(id="nav"):
-                yield Label("Stages", id="stage-title")
-                for stage in Stage:
-                    yield Label(f"  {stage.value}", id=f"stage-{stage.value}")
         with Horizontal(id="status-bar"):
             yield Static("Ready", id="status")
         with Horizontal(id="input-area"):
             yield Input(placeholder="Enter command or requirement...", id="user-input")
             yield Button("Send", id="send-btn", variant="primary")
+            yield Static("", id="stage-display")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send-btn":
@@ -275,115 +244,20 @@ class DevCLIApp(App):
         await db.update_task_status(last_failed.id, __import__("devcli.db.models", fromlist=["TaskStatus"]).TaskStatus.PENDING)
         log.write("[green]Task reset to pending.[/green]")
 
-    async def _refresh_file_tree(self) -> None:
-        """Refresh the file tree with git status indicators."""
-        tree = self.query_one("#file-tree", Tree)
-        tree.clear()
-        root_path = Path(self.project_dir)
-        if not root_path.exists():
-            return
-
-        # Get git status
-        git_status = {}
-        try:
-            context = ToolContext(work_dir=self.project_dir, session_id=self.session_id)
-            result = await self._git_tool.execute({"action": "status"}, context)
-            if result.success:
-                for line in result.output.strip().split("\n"):
-                    if line.strip():
-                        status_code = line[:2]
-                        filepath = line[3:].strip()
-                        git_status[filepath] = status_code
-        except Exception:
-            pass
-
-        # Build tree
-        root_node = tree.root
-        root_node.set_label(f"[bold]{root_path.name}/[/bold]")
-        self._populate_tree(root_node, root_path, git_status)
-        tree.root.expand()
-
-        # Schedule next refresh
-        self.set_timer(5.0, self._refresh_file_tree)
-
-    def _populate_tree(self, parent_node, path: Path, git_status: dict, depth: int = 0) -> None:
-        """Recursively populate file tree with git status indicators."""
-        if depth > 4:
-            return
-
-        try:
-            entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-        except PermissionError:
-            return
-
-        skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", ".idea", ".vscode"}
-
-        for entry in entries:
-            if entry.name.startswith("."):
-                continue
-            if entry.is_dir() and entry.name in skip_dirs:
-                continue
-
-            rel_path = str(entry.relative_to(self.project_dir)).replace("\\", "/")
-            git_indicator = self._get_git_indicator(git_status, rel_path, entry)
-
-            label = f"{git_indicator} {entry.name}"
-            if entry.is_dir():
-                label = f"[bold]{label}/[/bold]"
-                node = parent_node.add(label)
-                self._populate_tree(node, entry, git_status, depth + 1)
-            else:
-                parent_node.add(label)
-
-    def _get_git_indicator(self, git_status: dict, rel_path: str, entry: Path) -> str:
-        """Get git status indicator for a file."""
-        status = git_status.get(rel_path, "")
-        if not status:
-            # Check if it matches as a prefix (for directories)
-            for key in git_status:
-                if key.startswith(rel_path + "/"):
-                    return "[yellow]?[/yellow]"
-            return "[dim]·[/dim]"
-
-        if status.startswith("M"):
-            return "[yellow]M[/yellow]"
-        if status.startswith("A") or status == "??":
-            return "[green]+[/green]"
-        if status.startswith("D"):
-            return "[red]-[/red]"
-        if status.startswith("R"):
-            return "[cyan]R[/cyan]"
-        return "[dim]·[/dim]"
-
-    async def _update_stage_labels(self) -> None:
-        """Update stage labels with current stage highlighting."""
+    async def _update_stage_display(self) -> None:
+        """Update stage display with current stage."""
         session = await self.session_manager.get_session(self.session_id)
         if not session:
             return
 
         current_stage = session.current_stage
-        stages = list(Stage)
-        current_index = stages.index(current_stage)
-
-        for i, stage in enumerate(stages):
-            label = self.query_one(f"#stage-{stage.value}", Label)
-            if i < current_index:
-                label.update(f"  ✓ {stage.value}")
-                label.add_class("stage-completed")
-                label.remove_class("stage-active", "stage-pending")
-            elif i == current_index:
-                label.update(f"▶ {stage.value}")
-                label.add_class("stage-active")
-                label.remove_class("stage-completed", "stage-pending")
-            else:
-                label.update(f"  ○ {stage.value}")
-                label.add_class("stage-pending")
-                label.remove_class("stage-completed", "stage-active")
+        display = self.query_one("#stage-display", Static)
+        display.update(f"[bold green]▶ {current_stage.value}[/bold green]")
 
         status = self.query_one("#status", Static)
         status.update(f"Session: {self.session_id} | Stage: [bold]{current_stage.value}[/bold]")
 
-        self._current_stage_index = current_index
+        self._current_stage = current_stage
 
     async def action_advance_stage(self) -> None:
         """Advance to the next stage."""
@@ -393,7 +267,7 @@ class DevCLIApp(App):
         try:
             next_stage = await self.state_machine.advance()
             log.write(f"[green]Advanced to stage: {next_stage.value}[/green]")
-            await self._update_stage_labels()
+            await self._update_stage_display()
         except Exception as e:
             log.write(f"[red]Cannot advance stage: {e}[/red]")
 
